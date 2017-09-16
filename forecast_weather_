@@ -1,0 +1,337 @@
+#! /usr/bin/env python3
+
+# Copyright © 2017 Johan Grande
+# License = GNU GPL version 2 or 3
+
+
+# <TOC>
+# Utils ....................................................................  32
+#   Logging ................................................................  33
+#   Date/time ..............................................................  39
+# Data sources .............................................................  54
+# DB ....................................................................... 134
+# Configuration ............................................................ 224
+# Main ..................................................................... 271
+# </TOC>
+
+
+from collections import OrderedDict
+from datetime import datetime, timedelta
+import json
+import os
+import re
+import socket
+import sqlite3
+import sys
+from urllib.error import HTTPError, URLError
+from urllib.request import urlopen
+
+from pytz import timezone, utc
+
+
+# == Utils ==
+# === Logging ===
+
+def log(*args, **kwargs):
+    print(*args, file=sys.stderr, **kwargs)
+
+
+# === Date/time ===
+
+def is_utc_datetime(x):
+    return type(x) == datetime and x.tzinfo == utc
+
+def datetime_floor(dt, td):
+    assert is_utc_datetime(dt)
+    assert type(td) == timedelta
+
+    return dt - (dt - utc.localize(datetime.min)) % td
+
+def now():
+    return datetime.now(utc)
+
+
+# == Data sources ==
+
+def try_url(url, conf):
+    try:
+        response = urlopen(url, timeout=20)
+    except socket.timeout as e:
+        log(conf['source'], "socket.timeout", e.strerror)
+    except HTTPError as e:
+        log(conf['source'], "HTTPError", e.code, e.reason)
+    except URLError as e:
+        log(conf['source'], "URLError", e.reason)
+
+    txt = response.read().decode('UTF-8')
+
+    try:
+        return json.loads(txt)
+    except ValueError as e:
+        log(conf['source'], "ValueError in HTTP response:", e)
+        log("txt='", txt, "'")
+
+
+def darksky_forecast(conf, target_time):
+    assert is_utc_datetime(target_time)
+
+    # Get data
+    url = "https://api.darksky.net/forecast"
+    url += "/" + conf['darksky_key']
+    url += "/%f" % conf['latitude']
+    url += ",%f" % conf['longitude']
+    url += ",%d" % target_time.timestamp()
+    url += "?exclude=minutely,hourly,daily,flags&units=ca"
+
+    fc_json = try_url(url, conf)
+    if fc_json is None:
+        return
+
+    res = fc_json['currently']
+    res['humidity'] *= 100  # convert to percents
+    return res
+
+
+def previsionmeteo_forecast(conf, target_time):
+    assert is_utc_datetime(target_time)
+
+    # Get data
+    if 'place' in conf:
+        place = conf['place']
+    else:
+        place = "lat=%.3flng=%.3f" % (conf['latitude'], conf['longitude'])
+
+    url = "http://www.prevision-meteo.ch/services/json/" + place
+
+    fc_json = try_url(url, conf)
+    if fc_json is None:
+        return
+
+    # Compute target date/time in Previsionmeteo's reference frame
+    local_tz = timezone("Europe/Zurich")
+    local_target_time = target_time.astimezone(local_tz)
+    day = (local_target_time.date() - datetime.now(local_tz).date()).days
+    day_str = "fcst_day_%d" % day
+    hour_str = "%dH00" % local_target_time.hour
+
+    res = {}
+    res['temperature'] = fc_json[day_str]['hourly_data'][hour_str]['TMP2m']
+    res['humidity'] = fc_json[day_str]['hourly_data'][hour_str]['RH2m']
+    return res
+
+
+def fetch_forecast(conf, target_time):
+    if conf['source'] == "darksky":
+        return darksky_forecast(conf, target_time)
+
+    elif conf['source'] == "previsionmeteo":
+        return previsionmeteo_forecast(conf, target_time)
+
+    else:
+        assert False
+
+
+# == DB ==
+
+sql_cond = '''source = :source
+    AND advance = :advance
+    AND ((latitude = :latitude AND longitude = :longitude)
+         OR place = :place)'''
+
+
+def get_db(db_file):
+    con = sqlite3.connect(db_file, 120)  # timeout 120 seconds
+    con.row_factory = sqlite3.Row
+    cur = con.cursor()
+
+    # Create table if it doesn't exist yet
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS data (
+            time_from TEXT,
+            time_to TEXT,
+            source TEXT,
+            advance INT,
+            latitude REAL,
+            longitude REAL,
+            place TEXT,
+            temperature REAL,
+            humidity REAL
+        )
+    ''')
+
+    return con, cur
+
+
+def purge_db(cur):
+    cur.execute('''
+        DELETE FROM data WHERE datetime(time_to) < datetime('now')
+    ''')
+
+
+def fetch_and_store_forecast(cur, conf):
+    target_time = now() + conf['advance']
+
+    query_bindings = conf.copy()
+    query_bindings['target_time'] = target_time.isoformat()
+    query_bindings['advance'] = int(conf['advance'].total_seconds())
+    cur.execute('''
+        SELECT time_from FROM data
+        WHERE datetime(time_from) <= datetime(:target_time)
+        AND datetime(:target_time) < datetime(time_to)
+        AND ''' + sql_cond, query_bindings)
+
+    if cur.fetchone() is not None:  # we already have the data
+        return
+
+    fc = fetch_forecast(conf, target_time)
+
+    if fc is None:  # can't fetch the data
+        return
+
+    fc['time_from'] = datetime_floor(target_time,
+                                        conf['time_resolution'])
+    fc['time_to'] = fc['time_from'] + conf['time_resolution']
+
+    fc['source'] = conf['source']
+    fc['advance'] = int(conf['advance'].total_seconds())
+
+    if 'latitude' in conf:
+        fc['latitude'] = conf['latitude']
+    if 'longitude' in conf:
+        fc['longitude'] = conf['longitude']
+    if 'place' in conf:
+        fc['place'] = conf['place']
+
+    cur.execute('''
+        INSERT INTO data
+        VALUES (:time_from, :time_to,
+                :source, :advance, :latitude, :longitude, :place,
+                :temperature, :humidity)
+    ''', fc)
+
+
+def get_stored_forecast(cur, conf):
+    query_bindings = conf.copy()
+    query_bindings['advance'] = int(conf['advance'].total_seconds())
+    cur.execute('''
+        SELECT temperature, humidity FROM data
+        WHERE datetime(time_from) <= datetime('now')
+        AND datetime('now') < datetime(time_to)
+        AND ''' + sql_cond, query_bindings)
+    return cur.fetchone()
+
+
+# == Configuration ==
+
+plugin_suffix = sys.argv[0][(sys.argv[0].rfind('_') + 1):]
+
+
+def type_conf(conf):
+    if 'advance' in conf:
+        conf['advance'] = timedelta(0, int(conf['advance']))
+    if 'time_resolution' in conf:
+        conf['time_resolution'] = timedelta(0, int(conf['time_resolution']))
+    if 'latitude' in conf:
+        conf['latitude'] = float(conf['latitude'])
+    if 'longitude' in conf:
+        conf['longitude'] = float(conf['longitude'])
+
+
+def get_global_conf():
+    conf = {}
+
+    for k in ['darksky_key', 'db_file', 'source',
+              'advance', 'time_resolution',
+              'latitude', 'longitude', 'place']:
+        if k in os.environ:
+            conf[k] = os.environ[k]
+
+    type_conf(conf)
+
+    return conf
+
+
+def get_field_conf():
+    conf = {}
+
+    for k, v in os.environ.items():
+        m = re.match(r'^field(\d+)_(.+)', k)
+        if m:
+            i = int(m.group(1))
+            if i not in conf:
+                conf[i] = {}
+            conf[i][m.group(2)] = v
+
+    for i in conf.keys():
+        type_conf(conf[i])
+
+    return conf
+
+
+# == Main ==
+
+if len(sys.argv) == 2 and sys.argv[1] == "autoconf":
+    print("yes")
+
+
+elif len(sys.argv) == 2 and sys.argv[1] == "config":
+    res = OrderedDict()
+
+    if 'host_name' in os.environ:
+        res['host_name'] = os.environ['host_name']
+
+    res['graph_title'] = os.environ.get('graph_title', "Forecast weather")
+
+    res['graph_vlabel'] = os.environ.get('graph_vlabel',
+                                         plugin_suffix.capitalize())
+
+    res['graph_category'] = 'sensors'
+
+    field_conf = get_field_conf()
+    for i in sorted(field_conf.keys()):
+        name = "field%d" % i
+        res[name+".label"] = field_conf[i].get('label', name)
+
+    res['graph_args'] = '--base 1000 -l 0'
+
+    for k, v in res.items():
+        print(k, v)
+
+
+elif len(sys.argv) == 2 and sys.argv[1] == "test":
+    for f in get_fields():
+        print(f)
+
+
+else:
+    global_conf = get_global_conf()
+    field_conf = get_field_conf()
+
+    con, cur = get_db(global_conf['db_file'])
+
+    try:
+        purge_db(cur)
+
+        not_stored_error_count = 0
+
+        for i in sorted(field_conf.keys()):
+            # Merge global and field conf
+            conf = global_conf.copy()
+            for k, v in field_conf[i].items():
+                conf[k] = v
+
+            fetch_and_store_forecast(cur, conf)
+
+            fc = get_stored_forecast(cur, conf)
+
+            if fc:
+                field_type = field_conf[i].get('type', plugin_suffix)
+                print("field%d.value" % i, fc[field_type])
+
+            else:
+                log("No stored forecast for the current time for field%d" % i)
+
+        con.commit()
+
+    finally:
+        con.close()
