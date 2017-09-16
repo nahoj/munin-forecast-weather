@@ -78,13 +78,13 @@ env.field100_time_resolution 300
 env.field100_type temperature
 ```
 
-You may want to combine the forecast data with data from other Munin graphs, such as temperature and humidity sensor data from e.g. [this plugin](https://cweiske.de/usb-wde1-tools.htm). You can do this with the [graph_order](http://munin-monitoring.org/wiki/LoaningData) directive.
+You may want to combine the forecast data with data from other Munin graphs, such as temperature and humidity sensor data from e.g. [this plugin](https://cweiske.de/usb-wde1-tools.htm). You can do this with the [`graph_order`](http://munin-monitoring.org/wiki/LoaningData) directive.
 
 
 ## Data sources
 
 The plugin can show data from the following sources:
 
-* [Dark Sky](https://darksky.net/). Worldwide forecasts. Freemium. You need to register online and set the darksky_key parameter in the munin-node conf. Accepts latitude/longitude only.
+* [Dark Sky](https://darksky.net/). Worldwide forecasts. Freemium. You need to register online and set the `darksky_key` parameter in the munin-node conf. Accepts latitude/longitude only.
 
 * [Prevision-meteo.ch](http://www.prevision-meteo.ch/). Forecasts for Switzerland, Belgium and France. Free, no registration required. Accepts locality identifier (preferred, to look up on the website) or latitude/longitude.
