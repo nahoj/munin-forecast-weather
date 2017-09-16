@@ -58,7 +58,9 @@ env.longitude 7.0964
 
 [forecast_weather_humidity]
 env.graph_title Forecast humidity
-# A field name is "field" followed by digits
+# A field name is "field" followed by digits.
+# Most parameters (e.g. latitude, advance) can be set either globally (above)
+# or on a field-by-field basis (below).
 env.field100_label Prevision-meteo 24h
 # Advance and time resolution are expressed in seconds
 env.field100_advance 86400
@@ -76,7 +78,7 @@ env.field100_time_resolution 300
 env.field100_type temperature
 ```
 
-You may want to combine the forecast data with data from other Munin graphs, such as temperature and humidity sensor data with e.g. [this plugin](https://cweiske.de/usb-wde1-tools.htm). You can do this with the [graph_order](http://munin-monitoring.org/wiki/LoaningData) directive.
+You may want to combine the forecast data with data from other Munin graphs, such as temperature and humidity sensor data from e.g. [this plugin](https://cweiske.de/usb-wde1-tools.htm). You can do this with the [graph_order](http://munin-monitoring.org/wiki/LoaningData) directive.
 
 
 ## Data sources
