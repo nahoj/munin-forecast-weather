@@ -7,6 +7,8 @@ The plugin can output temperature (°C) and humidity (%) values.
 
 ## Install & config
 
+Requirements: Python 3 and pytz (`pip3 install pytz`).
+
 For a default setup:
 
 ```bash
