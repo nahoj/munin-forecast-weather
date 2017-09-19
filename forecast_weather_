@@ -58,10 +58,13 @@ def try_url(url, conf):
         response = urlopen(url, timeout=20)
     except socket.timeout as e:
         log(conf['source'], "socket.timeout", e.strerror)
+        return
     except HTTPError as e:
         log(conf['source'], "HTTPError", e.code, e.reason)
+        return
     except URLError as e:
         log(conf['source'], "URLError", e.reason)
+        return
 
     txt = response.read().decode('UTF-8')
 
